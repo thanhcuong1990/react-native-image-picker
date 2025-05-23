@@ -17,23 +17,13 @@
 
 + (CGSize)getVideoDimensionsFromUrl:(NSURL *)url;
 
-+ (NSString *) getFileTypeFromUrl:(NSURL *)url;
++ (NSString *)getFileTypeFromUrl:(NSURL *)url;
 
-+ (NSString *) getFileSizeFromUrl:(NSURL *)url;
++ (NSNumber *)getFileSizeFromUrl:(NSURL *)url;
 
 + (PHAsset *)fetchAssetFromImageInfo:(NSDictionary<NSString *,id> *)info;
 
-+ (BOOL)isAssetInICloud:(PHAsset *)asset;
-
-+ (void)fetchImageFromICloudIfNeeded:(PHAsset *)asset 
-                         targetSize:(CGSize)targetSize 
-                        contentMode:(PHImageContentMode)contentMode 
-                            options:(PHImageRequestOptions *)options 
-                         completion:(void (^)(UIImage *image, NSDictionary *info, NSError *error))completion;
-
-+ (void)fetchImageDataFromICloudIfNeeded:(PHAsset *)asset 
-                              options:(PHImageRequestOptions *)options 
-                           completion:(void (^)(NSData *imageData, NSString *dataUTI, UIImageOrientation orientation, NSDictionary *info, NSError *error))completion;
++ (NSString *)getLocalIdentifierFromImageURL:(NSURL *)url;
 
 + (NSData *)getImageDataHandlingICloud:(NSURL *)url phAsset:(PHAsset *)asset;
 
