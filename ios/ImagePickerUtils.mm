@@ -277,13 +277,14 @@
     checkOptions.networkAccessAllowed = NO; // Don't download yet
     
     __block BOOL isCloudAsset = NO;
-    [[PHImageManager defaultManager] requestImageDataForAsset:asset
-                                                      options:checkOptions
-                                                resultHandler:^(NSData * _Nullable data, NSString * _Nullable dataUTI, UIImageOrientation orientation, NSDictionary * _Nullable info) {
-                                                    if (info[PHImageResultIsInCloudKey] && [info[PHImageResultIsInCloudKey] boolValue]) {
-                                                        isCloudAsset = YES;
-                                                    }
-                                                }];
+    
+    [[PHImageManager defaultManager] requestImageDataAndOrientationForAsset:asset
+                                                  options:checkOptions
+                                            resultHandler:^(NSData * _Nullable data, NSString * _Nullable dataUTI, CGImagePropertyOrientation orientation, NSDictionary * _Nullable info) {
+                                                if (info[PHImageResultIsInCloudKey] && [info[PHImageResultIsInCloudKey] boolValue]) {
+                                                    isCloudAsset = YES;
+                                                }
+                                            }];
     
     // Set up request options
     __block NSData *imageData = nil;
@@ -294,11 +295,11 @@
     requestOptions.progressHandler = ^(double progress, NSError *error, BOOL *stop, NSDictionary *info) {};
     
     // Get full-resolution image data
-    [[PHImageManager defaultManager] requestImageDataForAsset:asset 
-                                                     options:requestOptions 
-                                               resultHandler:^(NSData * _Nullable data, NSString * _Nullable dataUTI, UIImageOrientation orientation, NSDictionary * _Nullable info) {
-                                                    imageData = data;
-                                               }];
+    [[PHImageManager defaultManager] requestImageDataAndOrientationForAsset:asset 
+                                                 options:requestOptions 
+                                           resultHandler:^(NSData * _Nullable data, NSString * _Nullable dataUTI, CGImagePropertyOrientation orientation, NSDictionary * _Nullable info) {
+                                                imageData = data;
+                                           }];
     
     return imageData;
 }
