@@ -82,7 +82,6 @@ RCT_EXPORT_METHOD(launchImageLibrary:(NSDictionary *)options callback:(RCTRespon
             picker.presentationController.delegate = self;
 
             if([self.options[@"includeExtra"] boolValue]) {
-
                 [self checkPhotosPermissions:^(BOOL granted) {
                     if (!granted) {
                         self.callback(@[@{@"errorCode": errPermission}]);
@@ -335,24 +334,47 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
 
 - (void)checkPhotosPermissions:(void(^)(BOOL granted))callback
 {
-    PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
-    if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
-        callback(YES);
-        return;
-    } else if (status == PHAuthorizationStatusNotDetermined) {
-        [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus status) {
-            if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
-                callback(YES);
-                return;
-            }
-            else {
-                callback(NO);
-                return;
-            }
-        }];
-    }
-    else {
-        callback(NO);
+    if (@available(iOS 14, *)) {
+        PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
+        if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
+            callback(YES);
+            return;
+        } else if (status == PHAuthorizationStatusNotDetermined) {
+            [PHPhotoLibrary requestAuthorizationForAccessLevel:PHAccessLevelReadWrite handler:^(PHAuthorizationStatus status) {
+                if (status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited) {
+                    callback(YES);
+                    return;
+                }
+                else {
+                    callback(NO);
+                    return;
+                }
+            }];
+        }
+        else {
+            callback(NO);
+        }
+    } else {
+        // iOS 13 and below - use older API
+        PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatus];
+        if (status == PHAuthorizationStatusAuthorized) {
+            callback(YES);
+            return;
+        } else if (status == PHAuthorizationStatusNotDetermined) {
+            [PHPhotoLibrary requestAuthorization:^(PHAuthorizationStatus status) {
+                if (status == PHAuthorizationStatusAuthorized) {
+                    callback(YES);
+                    return;
+                }
+                else {
+                    callback(NO);
+                    return;
+                }
+            }];
+        }
+        else {
+            callback(NO);
+        }
     }
 }
 
@@ -421,7 +443,27 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
 @implementation ImagePickerManager (UIImagePickerControllerDelegate)
 
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<NSString *,id> *)info
-{
+{   
+    // Show loading indicator immediately
+    __block UIActivityIndicatorView *loadingIndicator;
+    __block UIView *overlayView;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Create a semi-transparent overlay to prevent user interaction while processing
+        overlayView = [[UIView alloc] initWithFrame:picker.view.bounds];
+        overlayView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+        
+        // Create and configure the activity indicator
+        loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+        loadingIndicator.color = [UIColor whiteColor];
+        loadingIndicator.center = overlayView.center;
+        [overlayView addSubview:loadingIndicator];
+        
+        // Add the overlay to the picker view
+        [picker.view addSubview:overlayView];
+        [loadingIndicator startAnimating];
+    });
+    
     dispatch_block_t dismissCompletionBlock = ^{
         NSMutableArray<NSDictionary *> *assets = [[NSMutableArray alloc] initWithCapacity:1];
         PHAsset *asset = nil;
@@ -494,20 +536,40 @@ API_AVAILABLE(ios(14))
 @implementation ImagePickerManager (PHPickerViewControllerDelegate)
 
 - (void)picker:(PHPickerViewController *)picker didFinishPicking:(NSArray<PHPickerResult *> *)results API_AVAILABLE(ios(14))
-{
-    [picker dismissViewControllerAnimated:YES completion:nil];
-
-    if (photoSelected == YES) {
-        return;
-    }
-    photoSelected = YES;
-
+{   
     if (results.count == 0) {
+        [picker dismissViewControllerAnimated:YES completion:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
             self.callback(@[@{@"didCancel": @YES}]);
         });
         return;
     }
+    
+    // Show loading indicator immediately
+    __block UIActivityIndicatorView *loadingIndicator;
+    __block UIView *overlayView;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Create a semi-transparent overlay to prevent user interaction while processing
+        overlayView = [[UIView alloc] initWithFrame:picker.view.bounds];
+        overlayView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+        
+        // Create and configure the activity indicator
+        loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+        loadingIndicator.color = [UIColor whiteColor];
+        loadingIndicator.center = overlayView.center;
+        [overlayView addSubview:loadingIndicator];
+        
+        // Add the overlay to the picker view
+        [picker.view addSubview:overlayView];
+        [loadingIndicator startAnimating];
+    });
+
+    if (photoSelected == YES) {
+        [picker dismissViewControllerAnimated:YES completion:nil];
+        return;
+    }
+    photoSelected = YES;
 
     dispatch_group_t completionGroup = dispatch_group_create();
     NSMutableArray<NSDictionary *> *assets = [[NSMutableArray alloc] initWithCapacity:results.count];
@@ -560,6 +622,8 @@ API_AVAILABLE(ios(14))
     }];
 
     dispatch_group_notify(completionGroup, dispatch_get_main_queue(), ^{
+        [picker dismissViewControllerAnimated:YES completion:nil];
+        
         for (NSDictionary *asset in assets) {
             if ([asset isEqual:[NSNull null]]) {
                 self.callback(@[@{@"errorCode": errOthers}]);

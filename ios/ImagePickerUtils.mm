@@ -174,6 +174,15 @@
     return newImage;
 }
 
++ (void)ensureAssetDownloaded:(PHAsset *)asset {
+    if (!asset) {
+        return;
+    }
+
+    // Use our synchronous method to force download
+    [self getImageDataHandlingICloud:nil phAsset:asset];
+}
+
 + (PHAsset *)fetchAssetFromImageInfo:(NSDictionary<NSString *,id> *)info
 {
     NSURL *assetURL = info[UIImagePickerControllerImageURL];
@@ -184,9 +193,15 @@
     NSString *localID = [self getLocalIdentifierFromImageURL:assetURL];
     if (localID) {
         PHFetchResult* fetchResult = [PHAsset fetchAssetsWithLocalIdentifiers:@[localID] options:nil];
-        return fetchResult.firstObject;
+        PHAsset *asset = fetchResult.firstObject;
+        
+        if (asset) {
+            // Ensure the asset is downloaded if it's an iCloud asset
+            [self ensureAssetDownloaded:asset];
+        }
+        
+        return asset;
     }
-    
     return nil;
 }
 
@@ -200,18 +215,25 @@
     fetchOptions.predicate = [NSPredicate predicateWithFormat:@"mediaType == %d", PHAssetMediaTypeImage];
     
     __block NSString *localIdentifier = nil;
+    __block PHAsset *foundAsset = nil;
     
     NSString *fileName = url.lastPathComponent;
-    
     PHFetchResult *result = [PHAsset fetchAssetsWithOptions:fetchOptions];
+    
     [result enumerateObjectsUsingBlock:^(PHAsset *asset, NSUInteger idx, BOOL *stop) {
         PHAssetResource *resource = [[PHAssetResource assetResourcesForAsset:asset] firstObject];
         if ([resource.originalFilename isEqualToString:fileName]) {
             localIdentifier = asset.localIdentifier;
+            foundAsset = asset;
             *stop = YES;
         }
     }];
     
+    // If we found an asset, ensure it's downloaded
+    if (foundAsset) {
+        [self ensureAssetDownloaded:foundAsset];
+    }
+
     return localIdentifier;
 }
 
@@ -236,6 +258,49 @@
         default:
             return UIImageOrientationUp;
     }
+}
+
++ (NSData *)getImageDataHandlingICloud:(NSURL *)url phAsset:(PHAsset *)asset
+{
+    if (!asset && !url) {
+        return nil;
+    }
+    
+    // If we have a URL but no asset, try to get data directly
+    if (!asset && url) {
+        return [NSData dataWithContentsOfURL:url];
+    }
+    
+    // Create a standard options structure to identify iCloud assets
+    PHImageRequestOptions *checkOptions = [PHImageRequestOptions new];
+    checkOptions.synchronous = YES;
+    checkOptions.networkAccessAllowed = NO; // Don't download yet
+    
+    __block BOOL isCloudAsset = NO;
+    [[PHImageManager defaultManager] requestImageDataForAsset:asset
+                                                      options:checkOptions
+                                                resultHandler:^(NSData * _Nullable data, NSString * _Nullable dataUTI, UIImageOrientation orientation, NSDictionary * _Nullable info) {
+                                                    if (info[PHImageResultIsInCloudKey] && [info[PHImageResultIsInCloudKey] boolValue]) {
+                                                        isCloudAsset = YES;
+                                                    }
+                                                }];
+    
+    // Set up request options
+    __block NSData *imageData = nil;
+    PHImageRequestOptions *requestOptions = [PHImageRequestOptions new];
+    requestOptions.networkAccessAllowed = YES;
+    requestOptions.synchronous = YES;
+    requestOptions.deliveryMode = PHImageRequestOptionsDeliveryModeHighQualityFormat;
+    requestOptions.progressHandler = ^(double progress, NSError *error, BOOL *stop, NSDictionary *info) {};
+    
+    // Get full-resolution image data
+    [[PHImageManager defaultManager] requestImageDataForAsset:asset 
+                                                     options:requestOptions 
+                                               resultHandler:^(NSData * _Nullable data, NSString * _Nullable dataUTI, UIImageOrientation orientation, NSDictionary * _Nullable info) {
+                                                    imageData = data;
+                                               }];
+    
+    return imageData;
 }
 
 @end

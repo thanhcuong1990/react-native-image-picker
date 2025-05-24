@@ -27,10 +27,8 @@
 
 + (NSData *)getImageDataHandlingICloud:(NSURL *)url phAsset:(PHAsset *)asset;
 
-+ (void)getImageDataHandlingICloudAsync:(NSURL *)url 
-                                phAsset:(PHAsset *)asset 
-                             completion:(void (^)(NSData *imageData, NSError *error))completion;
-
 + (UIImageOrientation)UIImageOrientationFromCGImagePropertyOrientation:(CGImagePropertyOrientation)cgOrientation;
+
++ (void)ensureAssetDownloaded:(PHAsset *)asset;
     
 @end
