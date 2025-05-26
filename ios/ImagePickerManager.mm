@@ -10,6 +10,8 @@
 
 @property (nonatomic, strong) RCTResponseSenderBlock callback;
 @property (nonatomic, copy) NSDictionary *options;
+@property (nonatomic, assign) BOOL isCancelled;
+@property (nonatomic, assign) BOOL callbackInvoked;
 
 @end
 
@@ -65,9 +67,11 @@ RCT_EXPORT_METHOD(launchImageLibrary:(NSDictionary *)options callback:(RCTRespon
 - (void)launchImagePicker:(NSDictionary *)options callback:(RCTResponseSenderBlock)callback
 {
     self.callback = callback;
+    self.isCancelled = NO;
+    self.callbackInvoked = NO;
 
     if (target == camera && [ImagePickerUtils isSimulator]) {
-        self.callback(@[@{@"errorCode": errCameraUnavailable}]);
+        [self safeInvokeCallback:@[@{@"errorCode": errCameraUnavailable}]];
         return;
     }
 
@@ -84,7 +88,7 @@ RCT_EXPORT_METHOD(launchImageLibrary:(NSDictionary *)options callback:(RCTRespon
             if([self.options[@"includeExtra"] boolValue]) {
                 [self checkPhotosPermissions:^(BOOL granted) {
                     if (!granted) {
-                        self.callback(@[@{@"errorCode": errPermission}]);
+                        [self safeInvokeCallback:@[@{@"errorCode": errPermission}]];
                         return;
                     }
                     [self showPickerViewController:picker];
@@ -105,7 +109,7 @@ RCT_EXPORT_METHOD(launchImageLibrary:(NSDictionary *)options callback:(RCTRespon
     if([self.options[@"includeExtra"] boolValue]) {
         [self checkPhotosPermissions:^(BOOL granted) {
             if (!granted) {
-                self.callback(@[@{@"errorCode": errPermission}]);
+                [self safeInvokeCallback:@[@{@"errorCode": errPermission}]];
                 return;
             }
             [self showPickerViewController:picker];
@@ -425,6 +429,86 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
     return [fileName stringByAppendingString:fileType];
 }
 
+- (UIView *)createLoadingOverlayForView:(UIView *)parentView {
+    UIView *overlayView = [[UIView alloc] initWithFrame:parentView.bounds];
+    overlayView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
+    
+    UIView *containerView = [[UIView alloc] init];
+    containerView.backgroundColor = [UIColor colorWithWhite:0.1 alpha:0.9];
+    containerView.layer.cornerRadius = 12;
+    containerView.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    UIActivityIndicatorView *loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
+    loadingIndicator.color = [UIColor whiteColor];
+    loadingIndicator.translatesAutoresizingMaskIntoConstraints = NO;
+    [loadingIndicator startAnimating];
+    
+    UILabel *downloadingLabel = [[UILabel alloc] init];
+    downloadingLabel.text = @"Downloading";
+    downloadingLabel.textColor = [UIColor whiteColor];
+    downloadingLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    downloadingLabel.textAlignment = NSTextAlignmentCenter;
+    downloadingLabel.translatesAutoresizingMaskIntoConstraints = NO;
+    
+    UIButton *cancelButton = [UIButton buttonWithType:UIButtonTypeSystem];
+    [cancelButton setTitle:@"Cancel" forState:UIControlStateNormal];
+    [cancelButton setTitleColor:[UIColor whiteColor] forState:UIControlStateNormal];
+    cancelButton.titleLabel.font = [UIFont systemFontOfSize:16 weight:UIFontWeightMedium];
+    cancelButton.backgroundColor = [UIColor colorWithWhite:0.3 alpha:0.8];
+    cancelButton.layer.cornerRadius = 8;
+    cancelButton.translatesAutoresizingMaskIntoConstraints = NO;
+    [cancelButton addTarget:self action:@selector(cancelProcessing) forControlEvents:UIControlEventTouchUpInside];
+    
+    [containerView addSubview:loadingIndicator];
+    [containerView addSubview:downloadingLabel];
+    [containerView addSubview:cancelButton];
+    [overlayView addSubview:containerView];
+    
+    [NSLayoutConstraint activateConstraints:@[
+        [containerView.centerXAnchor constraintEqualToAnchor:overlayView.centerXAnchor],
+        [containerView.centerYAnchor constraintEqualToAnchor:overlayView.centerYAnchor],
+        [containerView.widthAnchor constraintEqualToConstant:200],
+        [containerView.heightAnchor constraintEqualToConstant:150],
+        
+        [loadingIndicator.centerXAnchor constraintEqualToAnchor:containerView.centerXAnchor],
+        [loadingIndicator.topAnchor constraintEqualToAnchor:containerView.topAnchor constant:20],
+        
+        [downloadingLabel.centerXAnchor constraintEqualToAnchor:containerView.centerXAnchor],
+        [downloadingLabel.topAnchor constraintEqualToAnchor:loadingIndicator.bottomAnchor constant:12],
+        [downloadingLabel.leadingAnchor constraintEqualToAnchor:containerView.leadingAnchor constant:16],
+        [downloadingLabel.trailingAnchor constraintEqualToAnchor:containerView.trailingAnchor constant:-16],
+        
+        [cancelButton.centerXAnchor constraintEqualToAnchor:containerView.centerXAnchor],
+        [cancelButton.topAnchor constraintEqualToAnchor:downloadingLabel.bottomAnchor constant:16],
+        [cancelButton.widthAnchor constraintEqualToConstant:80],
+        [cancelButton.heightAnchor constraintEqualToConstant:36]
+    ]];
+    
+    return overlayView;
+}
+
+- (void)cancelProcessing {
+    self.isCancelled = YES;
+    
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *presentedViewController = RCTPresentedViewController();
+        if (presentedViewController) {
+            [presentedViewController dismissViewControllerAnimated:YES completion:^{
+                [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
+            }];
+        } else {
+            [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
+        }
+    });
+}
+
+- (void)safeInvokeCallback:(NSArray *)response {
+    if (!self.callbackInvoked && self.callback) {
+        self.callbackInvoked = YES;
+        self.callback(response);
+    }
+}
+
 + (UIImage *)getUIImageFromInfo:(NSDictionary *)info
 {
     UIImage *image = info[UIImagePickerControllerEditedImage];
@@ -444,24 +528,11 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
 
 - (void)imagePickerController:(UIImagePickerController *)picker didFinishPickingMediaWithInfo:(NSDictionary<NSString *,id> *)info
 {   
-    // Show loading indicator immediately
-    __block UIActivityIndicatorView *loadingIndicator;
     __block UIView *overlayView;
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Create a semi-transparent overlay to prevent user interaction while processing
-        overlayView = [[UIView alloc] initWithFrame:picker.view.bounds];
-        overlayView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
-        
-        // Create and configure the activity indicator
-        loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-        loadingIndicator.color = [UIColor whiteColor];
-        loadingIndicator.center = overlayView.center;
-        [overlayView addSubview:loadingIndicator];
-        
-        // Add the overlay to the picker view
+        overlayView = [self createLoadingOverlayForView:picker.view];
         [picker.view addSubview:overlayView];
-        [loadingIndicator startAnimating];
     });
     
     if (photoSelected == YES) {
@@ -471,15 +542,23 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
         return;
     }
     photoSelected = YES;
+    self.isCancelled = NO;
     
     dispatch_async(dispatch_get_main_queue(), ^{
         [picker dismissViewControllerAnimated:YES completion:^{
-            // Process assets in background
             dispatch_queue_t processingQueue = dispatch_queue_create("com.imagepicker.processing", DISPATCH_QUEUE_CONCURRENT);
             dispatch_group_t processingGroup = dispatch_group_create();
             
             dispatch_group_enter(processingGroup);
             dispatch_async(processingQueue, ^{
+                if (self.isCancelled) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
+                    });
+                    dispatch_group_leave(processingGroup);
+                    return;
+                }
+                
                 NSMutableArray<NSDictionary *> *assets = [[NSMutableArray alloc] initWithCapacity:1];
                 PHAsset *asset = nil;
 
@@ -488,6 +567,14 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
                 }
 
                 if ([info[UIImagePickerControllerMediaType] isEqualToString:(NSString *) kUTTypeImage]) {
+                    if (self.isCancelled) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
+                        });
+                        dispatch_group_leave(processingGroup);
+                        return;
+                    }
+                    
                     UIImage *image = [ImagePickerManager getUIImageFromInfo:info];
                     NSData *imageData = nil;
                     NSURL *imageURL = [ImagePickerManager getNSURLFromInfo:info];
@@ -500,6 +587,14 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
 
                     [assets addObject:[self mapImageToAsset:image data:imageData phAsset:asset]];
                 } else {
+                    if (self.isCancelled) {
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
+                        });
+                        dispatch_group_leave(processingGroup);
+                        return;
+                    }
+                    
                     NSError *error;
                     NSDictionary *videoAsset = [self mapVideoToAsset:info[UIImagePickerControllerMediaURL] phAsset:asset error:&error];
 
@@ -507,7 +602,7 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
                         NSString *errorMessage = error.localizedFailureReason;
                         if (errorMessage == nil) errorMessage = @"Video asset not found";
                         dispatch_async(dispatch_get_main_queue(), ^{
-                            self.callback(@[@{@"errorCode": errOthers, @"errorMessage": errorMessage}]);
+                            [self safeInvokeCallback:@[@{@"errorCode": errOthers, @"errorMessage": errorMessage}]];
                         });
                         dispatch_group_leave(processingGroup);
                         return;
@@ -515,11 +610,17 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
                     [assets addObject:videoAsset];
                 }
 
-                dispatch_async(dispatch_get_main_queue(), ^{
-                    NSMutableDictionary *response = [[NSMutableDictionary alloc] init];
-                    response[@"assets"] = assets;
-                    self.callback(@[response]);
-                });
+                if (self.isCancelled) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
+                    });
+                } else {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        NSMutableDictionary *response = [[NSMutableDictionary alloc] init];
+                        response[@"assets"] = assets;
+                        [self safeInvokeCallback:@[response]];
+                    });
+                }
                 
                 dispatch_group_leave(processingGroup);
             });
@@ -531,7 +632,7 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
 {
     dispatch_async(dispatch_get_main_queue(), ^{
         [picker dismissViewControllerAnimated:YES completion:^{
-            self.callback(@[@{@"didCancel": @YES}]);
+            [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
         }];
     });
 }
@@ -542,7 +643,7 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
 
 - (void)presentationControllerDidDismiss:(UIPresentationController *)presentationController
 {
-    self.callback(@[@{@"didCancel": @YES}]);
+    [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
 }
 
 @end
@@ -555,29 +656,16 @@ API_AVAILABLE(ios(14))
     if (results.count == 0) {
         [picker dismissViewControllerAnimated:YES completion:nil];
         dispatch_async(dispatch_get_main_queue(), ^{
-            self.callback(@[@{@"didCancel": @YES}]);
+            [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
         });
         return;
     }
     
-    // Show loading indicator immediately
-    __block UIActivityIndicatorView *loadingIndicator;
     __block UIView *overlayView;
     
     dispatch_async(dispatch_get_main_queue(), ^{
-        // Create a semi-transparent overlay to prevent user interaction while processing
-        overlayView = [[UIView alloc] initWithFrame:picker.view.bounds];
-        overlayView.backgroundColor = [UIColor colorWithWhite:0 alpha:0.4];
-        
-        // Create and configure the activity indicator
-        loadingIndicator = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleLarge];
-        loadingIndicator.color = [UIColor whiteColor];
-        loadingIndicator.center = overlayView.center;
-        [overlayView addSubview:loadingIndicator];
-        
-        // Add the overlay to the picker view
+        overlayView = [self createLoadingOverlayForView:picker.view];
         [picker.view addSubview:overlayView];
-        [loadingIndicator startAnimating];
     });
 
     if (photoSelected == YES) {
@@ -585,6 +673,7 @@ API_AVAILABLE(ios(14))
         return;
     }
     photoSelected = YES;
+    self.isCancelled = NO;
 
     dispatch_group_t completionGroup = dispatch_group_create();
     dispatch_queue_t processingQueue = dispatch_queue_create("com.imagepicker.processing", DISPATCH_QUEUE_CONCURRENT);
@@ -595,8 +684,18 @@ API_AVAILABLE(ios(14))
     }
 
     [results enumerateObjectsUsingBlock:^(PHPickerResult *result, NSUInteger index, BOOL *stop) {
+        if (self.isCancelled) {
+            *stop = YES;
+            return;
+        }
+        
         dispatch_group_enter(completionGroup);
         dispatch_async(processingQueue, ^{
+            if (self.isCancelled) {
+                dispatch_group_leave(completionGroup);
+                return;
+            }
+            
             PHAsset *asset = nil;
             NSItemProvider *provider = result.itemProvider;
 
@@ -611,17 +710,21 @@ API_AVAILABLE(ios(14))
                     identifier = @"public.jpeg";
                 }
 
-                // Create a separate inner group for this specific loading operation
                 dispatch_group_t innerGroup = dispatch_group_create();
                 dispatch_group_enter(innerGroup);
                 
                 [provider loadFileRepresentationForTypeIdentifier:identifier completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+                    if (self.isCancelled) {
+                        dispatch_group_leave(innerGroup);
+                        return;
+                    }
+                    
                     NSData *imageData = nil;
                     if (url) {
                         imageData = [[NSData alloc] initWithContentsOfURL:url];
                     }
                     
-                    if (imageData) {
+                    if (imageData && !self.isCancelled) {
                         UIImage *image = [[UIImage alloc] initWithData:imageData];
                         assets[index] = [self mapImageToAsset:image data:imageData phAsset:asset];
                     } else {
@@ -630,18 +733,21 @@ API_AVAILABLE(ios(14))
                     dispatch_group_leave(innerGroup);
                 }];
                 
-                // Wait for this specific item to complete before exiting the group
                 dispatch_group_wait(innerGroup, DISPATCH_TIME_FOREVER);
                 dispatch_group_leave(completionGroup);
                 
             } else if ([provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) {
-                // Create a separate inner group for this specific loading operation
                 dispatch_group_t innerGroup = dispatch_group_create();
                 dispatch_group_enter(innerGroup);
                 
                 [provider loadFileRepresentationForTypeIdentifier:(NSString *)kUTTypeMovie completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+                    if (self.isCancelled) {
+                        dispatch_group_leave(innerGroup);
+                        return;
+                    }
+                    
                     NSDictionary *mappedAsset = [self mapVideoToAsset:url phAsset:asset error:nil];
-                    if (nil != mappedAsset) {
+                    if (nil != mappedAsset && !self.isCancelled) {
                         assets[index] = mappedAsset;
                     } else {
                         assets[index] = (NSDictionary *)[NSNull null];
@@ -649,7 +755,6 @@ API_AVAILABLE(ios(14))
                     dispatch_group_leave(innerGroup);
                 }];
                 
-                // Wait for this specific item to complete before exiting the group
                 dispatch_group_wait(innerGroup, DISPATCH_TIME_FOREVER);
                 dispatch_group_leave(completionGroup);
                 
@@ -663,7 +768,11 @@ API_AVAILABLE(ios(14))
     dispatch_group_notify(completionGroup, dispatch_get_main_queue(), ^{
         [picker dismissViewControllerAnimated:YES completion:nil];
         
-        // Check if any assets failed to load
+        if (self.isCancelled) {
+            [self safeInvokeCallback:@[@{@"didCancel": @YES}]];
+            return;
+        }
+        
         BOOL hasNullAssets = NO;
         for (NSDictionary *asset in assets) {
             if ([asset isEqual:[NSNull null]]) {
@@ -673,14 +782,14 @@ API_AVAILABLE(ios(14))
         }
         
         if (hasNullAssets) {
-            self.callback(@[@{@"errorCode": errOthers}]);
+            [self safeInvokeCallback:@[@{@"errorCode": errOthers}]];
             return;
         }
 
         NSMutableDictionary *response = [[NSMutableDictionary alloc] init];
         [response setObject:assets forKey:@"assets"];
 
-        self.callback(@[response]);
+        [self safeInvokeCallback:@[response]];
     });
 }
 
