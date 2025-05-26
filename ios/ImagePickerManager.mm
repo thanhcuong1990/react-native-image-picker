@@ -464,51 +464,66 @@ CGImagePropertyOrientation CGImagePropertyOrientationForUIImageOrientation(UIIma
         [loadingIndicator startAnimating];
     });
     
-    dispatch_block_t dismissCompletionBlock = ^{
-        NSMutableArray<NSDictionary *> *assets = [[NSMutableArray alloc] initWithCapacity:1];
-        PHAsset *asset = nil;
-
-        if (photoSelected == YES) {
-           return;
-        }
-        photoSelected = YES;
-
-        if([self.options[@"includeExtra"] boolValue]) {
-          asset = [ImagePickerUtils fetchAssetFromImageInfo:info];
-        }
-
-        if ([info[UIImagePickerControllerMediaType] isEqualToString:(NSString *) kUTTypeImage]) {
-            UIImage *image = [ImagePickerManager getUIImageFromInfo:info];
-            NSData *imageData = nil;
-            NSURL *imageURL = [ImagePickerManager getNSURLFromInfo:info];
-            if (imageURL) {
-                imageData = [NSData dataWithContentsOfURL:imageURL];
-            }
-            if (!imageData) {
-                imageData = UIImageJPEGRepresentation(image, 1.0);
-            }
-
-            [assets addObject:[self mapImageToAsset:image data:imageData phAsset:asset]];
-        } else {
-            NSError *error;
-            NSDictionary *videoAsset = [self mapVideoToAsset:info[UIImagePickerControllerMediaURL] phAsset:asset error:&error];
-
-            if (videoAsset == nil) {
-                NSString *errorMessage = error.localizedFailureReason;
-                if (errorMessage == nil) errorMessage = @"Video asset not found";
-                self.callback(@[@{@"errorCode": errOthers, @"errorMessage": errorMessage}]);
-                return;
-            }
-            [assets addObject:videoAsset];
-        }
-
-        NSMutableDictionary *response = [[NSMutableDictionary alloc] init];
-        response[@"assets"] = assets;
-        self.callback(@[response]);
-    };
-
+    if (photoSelected == YES) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            [picker dismissViewControllerAnimated:YES completion:nil];
+        });
+        return;
+    }
+    photoSelected = YES;
+    
     dispatch_async(dispatch_get_main_queue(), ^{
-        [picker dismissViewControllerAnimated:YES completion:dismissCompletionBlock];
+        [picker dismissViewControllerAnimated:YES completion:^{
+            // Process assets in background
+            dispatch_queue_t processingQueue = dispatch_queue_create("com.imagepicker.processing", DISPATCH_QUEUE_CONCURRENT);
+            dispatch_group_t processingGroup = dispatch_group_create();
+            
+            dispatch_group_enter(processingGroup);
+            dispatch_async(processingQueue, ^{
+                NSMutableArray<NSDictionary *> *assets = [[NSMutableArray alloc] initWithCapacity:1];
+                PHAsset *asset = nil;
+
+                if([self.options[@"includeExtra"] boolValue]) {
+                    asset = [ImagePickerUtils fetchAssetFromImageInfo:info];
+                }
+
+                if ([info[UIImagePickerControllerMediaType] isEqualToString:(NSString *) kUTTypeImage]) {
+                    UIImage *image = [ImagePickerManager getUIImageFromInfo:info];
+                    NSData *imageData = nil;
+                    NSURL *imageURL = [ImagePickerManager getNSURLFromInfo:info];
+                    if (imageURL) {
+                        imageData = [NSData dataWithContentsOfURL:imageURL];
+                    }
+                    if (!imageData) {
+                        imageData = UIImageJPEGRepresentation(image, 1.0);
+                    }
+
+                    [assets addObject:[self mapImageToAsset:image data:imageData phAsset:asset]];
+                } else {
+                    NSError *error;
+                    NSDictionary *videoAsset = [self mapVideoToAsset:info[UIImagePickerControllerMediaURL] phAsset:asset error:&error];
+
+                    if (videoAsset == nil) {
+                        NSString *errorMessage = error.localizedFailureReason;
+                        if (errorMessage == nil) errorMessage = @"Video asset not found";
+                        dispatch_async(dispatch_get_main_queue(), ^{
+                            self.callback(@[@{@"errorCode": errOthers, @"errorMessage": errorMessage}]);
+                        });
+                        dispatch_group_leave(processingGroup);
+                        return;
+                    }
+                    [assets addObject:videoAsset];
+                }
+
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    NSMutableDictionary *response = [[NSMutableDictionary alloc] init];
+                    response[@"assets"] = assets;
+                    self.callback(@[response]);
+                });
+                
+                dispatch_group_leave(processingGroup);
+            });
+        }];
     });
 }
 
@@ -572,63 +587,94 @@ API_AVAILABLE(ios(14))
     photoSelected = YES;
 
     dispatch_group_t completionGroup = dispatch_group_create();
+    dispatch_queue_t processingQueue = dispatch_queue_create("com.imagepicker.processing", DISPATCH_QUEUE_CONCURRENT);
+    
     NSMutableArray<NSDictionary *> *assets = [[NSMutableArray alloc] initWithCapacity:results.count];
     for (int i = 0; i < results.count; i++) {
         [assets addObject:(NSDictionary *)[NSNull null]];
     }
 
     [results enumerateObjectsUsingBlock:^(PHPickerResult *result, NSUInteger index, BOOL *stop) {
-        PHAsset *asset = nil;
-        NSItemProvider *provider = result.itemProvider;
-
-        if([self.options[@"includeExtra"] boolValue] && result.assetIdentifier != nil) {
-            PHFetchResult* fetchResult = [PHAsset fetchAssetsWithLocalIdentifiers:@[result.assetIdentifier] options:nil];
-            asset = fetchResult.firstObject;
-        }
-
         dispatch_group_enter(completionGroup);
+        dispatch_async(processingQueue, ^{
+            PHAsset *asset = nil;
+            NSItemProvider *provider = result.itemProvider;
 
-        if ([provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeImage]) {
-            NSString *identifier = provider.registeredTypeIdentifiers.firstObject;
-            if ([identifier containsString:@"live-photo-bundle"]) {
-                identifier = @"public.jpeg";
+            if([self.options[@"includeExtra"] boolValue] && result.assetIdentifier != nil) {
+                PHFetchResult* fetchResult = [PHAsset fetchAssetsWithLocalIdentifiers:@[result.assetIdentifier] options:nil];
+                asset = fetchResult.firstObject;
             }
 
-            [provider loadFileRepresentationForTypeIdentifier:identifier completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
-                NSData *imageData = nil;
-                if (url) {
-                    imageData = [[NSData alloc] initWithContentsOfURL:url];
+            if ([provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeImage]) {
+                NSString *identifier = provider.registeredTypeIdentifiers.firstObject;
+                if ([identifier containsString:@"live-photo-bundle"]) {
+                    identifier = @"public.jpeg";
                 }
+
+                // Create a separate inner group for this specific loading operation
+                dispatch_group_t innerGroup = dispatch_group_create();
+                dispatch_group_enter(innerGroup);
                 
-                if (imageData) {
-                    UIImage *image = [[UIImage alloc] initWithData:imageData];
-                    assets[index] = [self mapImageToAsset:image data:imageData phAsset:asset];
-                } else {
-                    assets[index] = (NSDictionary *)[NSNull null];
-                }
+                [provider loadFileRepresentationForTypeIdentifier:identifier completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+                    NSData *imageData = nil;
+                    if (url) {
+                        imageData = [[NSData alloc] initWithContentsOfURL:url];
+                    }
+                    
+                    if (imageData) {
+                        UIImage *image = [[UIImage alloc] initWithData:imageData];
+                        assets[index] = [self mapImageToAsset:image data:imageData phAsset:asset];
+                    } else {
+                        assets[index] = (NSDictionary *)[NSNull null];
+                    }
+                    dispatch_group_leave(innerGroup);
+                }];
+                
+                // Wait for this specific item to complete before exiting the group
+                dispatch_group_wait(innerGroup, DISPATCH_TIME_FOREVER);
                 dispatch_group_leave(completionGroup);
-            }];
-        } else if ([provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) {
-            [provider loadFileRepresentationForTypeIdentifier:(NSString *)kUTTypeMovie completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
-                NSDictionary *mappedAsset = [self mapVideoToAsset:url phAsset:asset error:nil];
-                if (nil != mappedAsset) {
-                    assets[index] = mappedAsset;
-                }
+                
+            } else if ([provider hasItemConformingToTypeIdentifier:(NSString *)kUTTypeMovie]) {
+                // Create a separate inner group for this specific loading operation
+                dispatch_group_t innerGroup = dispatch_group_create();
+                dispatch_group_enter(innerGroup);
+                
+                [provider loadFileRepresentationForTypeIdentifier:(NSString *)kUTTypeMovie completionHandler:^(NSURL * _Nullable url, NSError * _Nullable error) {
+                    NSDictionary *mappedAsset = [self mapVideoToAsset:url phAsset:asset error:nil];
+                    if (nil != mappedAsset) {
+                        assets[index] = mappedAsset;
+                    } else {
+                        assets[index] = (NSDictionary *)[NSNull null];
+                    }
+                    dispatch_group_leave(innerGroup);
+                }];
+                
+                // Wait for this specific item to complete before exiting the group
+                dispatch_group_wait(innerGroup, DISPATCH_TIME_FOREVER);
                 dispatch_group_leave(completionGroup);
-            }];
-        } else {
-            dispatch_group_leave(completionGroup);
-        }
+                
+            } else {
+                assets[index] = (NSDictionary *)[NSNull null];
+                dispatch_group_leave(completionGroup);
+            }
+        });
     }];
 
     dispatch_group_notify(completionGroup, dispatch_get_main_queue(), ^{
         [picker dismissViewControllerAnimated:YES completion:nil];
         
+        // Check if any assets failed to load
+        BOOL hasNullAssets = NO;
         for (NSDictionary *asset in assets) {
             if ([asset isEqual:[NSNull null]]) {
-                self.callback(@[@{@"errorCode": errOthers}]);
-                return;
+                hasNullAssets = YES;
+                break;
             }
+        }
+        
+        if (hasNullAssets) {
+            self.callback(@[@{@"errorCode": errOthers}]);
+            return;
         }
 
         NSMutableDictionary *response = [[NSMutableDictionary alloc] init];
